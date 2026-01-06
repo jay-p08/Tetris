@@ -1,2 +1,10 @@
+tetris\Board.class
+tetris\InputHandler.class
+tetris\TetrominoType.class
 tetris\Main.class
+tetris\KickData.class
 tetris\Main$1.class
+tetris\Tetromino$1.class
+tetris\GameSettings.class
+tetris\Main$2.class
+tetris\Tetromino.class
