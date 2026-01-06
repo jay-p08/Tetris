@@ -1,10 +1,14 @@
 tetris\Board.class
-tetris\InputHandler.class
-tetris\TetrominoType.class
+tetris\net\TetrisServer$ClientHandler.class
 tetris\Main.class
 tetris\KickData.class
+tetris\net\TetrisServer$GameRoom.class
+tetris\Tetromino.class
+tetris\InputHandler.class
+tetris\TetrominoType.class
+tetris\net\TetrisServer.class
 tetris\Main$1.class
 tetris\Tetromino$1.class
 tetris\GameSettings.class
 tetris\Main$2.class
-tetris\Tetromino.class
+tetris\net\NetworkClient.class

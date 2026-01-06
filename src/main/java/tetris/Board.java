@@ -45,9 +45,8 @@ public class Board {
                     int boardY = piece.y + row;
                     int boardX = piece.x + col;
                     if (boardY >= 0 && boardY < height && boardX >= 0 && boardX < width) {
-                        // For simplicity, using '1' or valid color index?
-                        // Using '1' for now, or could use 'type.ordinal() + 1'
-                        grid[boardY][boardX] = 1;
+                        // Store color index (1-based)
+                        grid[boardY][boardX] = piece.type.ordinal() + 1;
                     }
                 }
             }

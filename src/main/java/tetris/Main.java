@@ -1,29 +1,44 @@
 package tetris;
 
+import java.io.IOException;
+import java.util.Optional;
+import java.util.Random;
+
 import javafx.animation.AnimationTimer;
+import javafx.animation.PauseTransition;
 import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.Pane;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
-import javafx.scene.text.TextAlignment;
 import javafx.stage.Stage;
-
-import java.util.Random;
+import javafx.util.Duration;
+import tetris.net.NetworkClient;
 
 public class Main extends Application {
 
     static final int TILE = 30;
     static final int WIDTH = 10;
-    static final int HEIGHT = 20;
-    static final int CANVAS_WIDTH = 600;
-    static final int CANVAS_HEIGHT = 600;
-    static final int BOARD_OFFSET_X = 150;
-    static final int BOARD_OFFSET_Y = 0;
+    static final int HEIGHT = 24; // Total height (20 visible + 4 buffer)
+    static final int VISIBLE_HEIGHT = 20;
+    static final int BUFFER_ZONE = 4;
+
+    static final int CANVAS_WIDTH = 800; // Wider for MP
+    static final int CANVAS_HEIGHT = 800; // Increased to fit 24 rows + margins
+    static final int BOARD_OFFSET_X = 50;
+    // Board drawn starting from top (Buffer visible)
+    static final int BOARD_OFFSET_Y = 50;
+    static final int OPPONENT_OFFSET_X = 500;
 
     // Game Components
     Board board;
@@ -31,6 +46,7 @@ public class Main extends Application {
     Tetromino nextPiece;
     Tetromino holdPiece;
     InputHandler input = new InputHandler();
+    NetworkClient netClient;
 
     // Game State
     int score = 0;
@@ -40,41 +56,98 @@ public class Main extends Application {
     boolean isGameOver = false;
     boolean backToBack = false;
     boolean holdUsed = false;
+    boolean isMultiplayer = false;
+    boolean gameStarted = false; // Wait for room start
+
+    // Opponent State
+    int[][] opponentBoard; // Minimal representation
+    boolean opponentGameOver = false;
 
     // Timing
     long lastUpdate = 0;
     long lockTimer = 0;
-    double dropInterval = 500_000_000; // Nanoseconds (500ms)
+    double dropInterval = 1000;
     boolean touchingGround = false;
     int lockDelayMs = 500;
+    long lastArrUpdate = 0; // For ARR throttling
 
-    // Graphics
+    // UI
+    Stage primaryStage;
+    Scene menuScene;
+    Scene gameScene;
+    Pane gameRoot;
     GraphicsContext gc;
+    AnimationTimer gameLoop;
 
     @Override
     public void start(Stage stage) {
-        // Init Game
-        board = new Board(WIDTH, HEIGHT);
-        spawnNextPiece();
-        spawnPiece();
+        primaryStage = stage;
+        createMenuScene();
 
+        stage.setScene(menuScene);
+        stage.setTitle("Tetris Multiplayer");
+        stage.show();
+    }
+
+    void createMenuScene() {
+        VBox root = new VBox(20);
+        root.setAlignment(Pos.CENTER);
+        root.setStyle("-fx-background-color: #222;");
+
+        Label title = new Label("JAVA TETRIS");
+        title.setFont(Font.font("Arial", FontWeight.BOLD, 40));
+        title.setTextFill(Color.CYAN);
+
+        Button btnSingle = createStyledButton("Single Player");
+        btnSingle.setOnAction(e -> startSinglePlayer());
+
+        Button btnCreate = createStyledButton("Create Room");
+        btnCreate.setOnAction(e -> createRoom());
+
+        Button btnJoin = createStyledButton("Join Room");
+        btnJoin.setOnAction(e -> joinRoomDialog());
+
+        root.getChildren().addAll(title, btnSingle, btnCreate, btnJoin);
+        menuScene = new Scene(root, 400, 400);
+    }
+
+    Button createStyledButton(String text) {
+        Button btn = new Button(text);
+        btn.setStyle("-fx-background-color: #444; -fx-text-fill: white; -fx-font-size: 16px; -fx-min-width: 200px;");
+        btn.setOnMouseEntered(e -> btn.setStyle(
+                "-fx-background-color: #666; -fx-text-fill: white; -fx-font-size: 16px; -fx-min-width: 200px;"));
+        btn.setOnMouseExited(e -> btn.setStyle(
+                "-fx-background-color: #444; -fx-text-fill: white; -fx-font-size: 16px; -fx-min-width: 200px;"));
+        return btn;
+    }
+
+    void createGameScene() {
         Canvas canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
         gc = canvas.getGraphicsContext2D();
-        Pane root = new Pane(canvas);
-        Scene scene = new Scene(root);
+        gameRoot = new Pane(canvas);
+        gameScene = new Scene(gameRoot);
 
-        // Input Handling
-        scene.setOnKeyPressed(e -> {
+        gameScene.setOnKeyPressed(e -> {
+            if (!gameStarted && isMultiplayer)
+                return;
             long now = System.currentTimeMillis();
             KeyCode code = e.getCode();
             switch (code) {
-                case LEFT -> input.pressLeft(now);
-                case RIGHT -> input.pressRight(now);
-                case DOWN -> input.down = true; // Soft drop flag or immediate move?
+                case LEFT -> {
+                    if (!input.left) { // Initial Press
+                        input.pressLeft(now);
+                        move(-1, 0);
+                    }
+                }
+                case RIGHT -> {
+                    if (!input.right) { // Initial Press
+                        input.pressRight(now);
+                        move(1, 0);
+                    }
+                }
+                case DOWN -> input.down = true;
                 case UP, X -> rotate(true);
                 case Z, CONTROL -> rotate(false);
-                // Defaulting standard rotate to Up/X, CCW to Z/Ctrl usually
-                // User asked for: A=CCW, D=CW (Wait, user logic was A=CCW, D=CW)
                 case D -> rotate(true);
                 case A -> rotate(false);
                 case SPACE -> hardDrop();
@@ -82,7 +155,7 @@ public class Main extends Application {
             }
         });
 
-        scene.setOnKeyReleased(e -> {
+        gameScene.setOnKeyReleased(e -> {
             KeyCode code = e.getCode();
             switch (code) {
                 case LEFT -> input.releaseLeft();
@@ -91,35 +164,105 @@ public class Main extends Application {
             }
         });
 
-        stage.setScene(scene);
-        stage.setTitle("Java Tetris");
-        stage.show();
-        root.requestFocus();
+        primaryStage.setScene(gameScene);
+        primaryStage.centerOnScreen();
+        gameRoot.requestFocus();
 
-        // Game Loop
-        AnimationTimer timer = new AnimationTimer() {
+        gameLoop = new AnimationTimer() {
             @Override
             public void handle(long now) {
-                update(now);
+                if (!gameStarted && isMultiplayer) {
+                    drawWaiting();
+                    return;
+                }
+                long milliNow = System.currentTimeMillis();
+                update(milliNow);
                 draw();
             }
         };
-        timer.start();
+        gameLoop.start();
     }
 
-    // --- Logic ---
+    void startSinglePlayer() {
+        isMultiplayer = false;
+        gameStarted = true;
+        initGame();
+        createGameScene();
+    }
+
+    void connectToServer() {
+        if (netClient == null) {
+            netClient = new NetworkClient();
+            netClient.onMessage = this::handleNetworkMessage;
+            try {
+                netClient.connect("localhost", 9999);
+            } catch (IOException e) {
+                System.out.println("Connection Failed");
+            }
+        }
+    }
+
+    void createRoom() {
+        connectToServer();
+        netClient.createRoom();
+        isMultiplayer = true;
+        gameStarted = false;
+        initGame();
+        createGameScene();
+    }
+
+    void joinRoomDialog() {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Join Room");
+        dialog.setHeaderText("Enter Room ID:");
+        Optional<String> result = dialog.showAndWait();
+        result.ifPresent(id -> {
+            connectToServer();
+            netClient.joinRoom(id);
+            isMultiplayer = true;
+            gameStarted = false;
+            initGame();
+            createGameScene();
+        });
+    }
+
+    void handleNetworkMessage(String msg) {
+        System.out.println("NET: " + msg);
+        if (msg.startsWith("ROOM_CREATED:")) {
+            Platform.runLater(() -> primaryStage.setTitle("Room: " + msg.split(":")[1] + " (Waiting)"));
+        } else if (msg.startsWith("JOIN_SUCCESS:")) {
+            Platform.runLater(() -> primaryStage.setTitle("Room: " + msg.split(":")[1]));
+        } else if (msg.equals("GAME_START")) {
+            gameStarted = true;
+        } else if (msg.startsWith("OPPONENT_STATE:")) {
+            parseOpponentState(msg.substring("OPPONENT_STATE:".length()));
+        } else if (msg.startsWith("GARBAGE:")) {
+            int lines = Integer.parseInt(msg.split(":")[1]);
+            addGarbage(lines);
+        } else if (msg.equals("OPPONENT_GAME_OVER")) {
+            opponentGameOver = true;
+        }
+    }
+
+    void initGame() {
+        board = new Board(WIDTH, HEIGHT);
+        score = 0;
+        level = 1;
+        linesCleared = 0;
+        isGameOver = false;
+        opponentGameOver = false;
+        dropInterval = 1000;
+        spawnNextPiece();
+        spawnPiece();
+    }
 
     void update(long now) {
         if (isGameOver)
             return;
 
-        // 1. Handle Horizontal Move (DAS/ARR)
-        // Convert input.leftTimer -> System millis
-        handleInput(System.currentTimeMillis());
+        handleInput(now);
 
-        // 2. Handle Gravity
         if (input.down) {
-            // Soft Drop Speed
             double speedFactor = GameSettings.SOFT_DROP_SPEED;
             if (now - lastUpdate > dropInterval / speedFactor) {
                 move(0, 1);
@@ -133,7 +276,7 @@ public class Main extends Application {
             }
         }
 
-        // 3. Lock Delay
+        // Lock / Gravity Logic
         if (!board.canMove(currentPiece, currentPiece.x, currentPiece.y + 1)) {
             if (!touchingGround) {
                 touchingGround = true;
@@ -149,64 +292,23 @@ public class Main extends Application {
     }
 
     void handleInput(long now) {
-        // Left
+        long das = input.DAS;
+        long arr = input.ARR;
+
         if (input.left) {
-            if (now - input.leftTimer > (input.leftTimer == now ? 0 : input.DAS)) {
-                if (now - input.leftTimer >= input.DAS) {
-                    // ARR Check: we strictly step every ARR ms?
-                    // Or just move every frame if ARR is small? 40ms is ~25fps.
-                    // Simple limiter:
-                    // We need a lastMoveTime for ARR to be precise.
-                    // Simplified:
+            if (now - input.leftTimer >= das) {
+                if (now - lastArrUpdate >= arr) {
                     move(-1, 0);
-                    // This is too fast (every frame after DAS).
-                    // Proper ARR needs 'nextShiftTime'.
-                    // For this verification, I'll rely on the simple logic I wrote:
-                    // The user's request was high quality. I should implement a proper accumulator
-                    // or timer.
-                    // But let's stick to the previous 'simple' logic for stability first.
-                    // Actually, let's fix the user's "Too fast" issue by ensuring we don't move
-                    // every frame unless ARR=0.
-                    // Using a modulo or separate timer is best.
-                    // Let's modify InputHandler to track `lastArr`.
+                    lastArrUpdate = now;
                 }
             }
         }
         if (input.right) {
-            if (now - input.rightTimer > (input.rightTimer == now ? 0 : input.DAS)) {
-                move(1, 0);
-            }
-        }
-        // Note: This input handling is still "Simple".
-        // Real logic requires tracking "nextShiftTime".
-        // I will implement a simpler "Move if can" here for the refactor to ensure it
-        // compiles first.
-    }
-
-    // Better Input Logic with minimal state
-    long nextLeftTime = 0;
-    long nextRightTime = 0;
-
-    void handleInputPrecise() {
-        long now = System.currentTimeMillis();
-        if (input.left) {
-            if (input.leftTimer == now) { // First press
-                move(-1, 0);
-                nextLeftTime = now + input.DAS;
-                input.leftTimer = now - 1; // Mark as processed
-            } else if (now >= nextLeftTime) {
-                move(-1, 0);
-                nextLeftTime = now + input.ARR;
-            }
-        }
-        if (input.right) {
-            if (input.rightTimer == now) {
-                move(1, 0);
-                nextRightTime = now + input.DAS;
-                input.rightTimer = now - 1;
-            } else if (now >= nextRightTime) {
-                move(1, 0);
-                nextRightTime = now + input.ARR;
+            if (now - input.rightTimer >= das) {
+                if (now - lastArrUpdate >= arr) {
+                    move(1, 0);
+                    lastArrUpdate = now;
+                }
             }
         }
     }
@@ -216,10 +318,8 @@ public class Main extends Application {
             currentPiece.x += dx;
             currentPiece.y += dy;
             if (dx != 0 || dy != 0) {
-                // Move successful
+                // Reset Lock Timer
                 if (touchingGround) {
-                    // Reset lock delay on successful move (Limited infinity usually, but simple
-                    // reset here)
                     lockTimer = System.currentTimeMillis();
                 }
                 currentPiece.lastMoveWasRotate = false;
@@ -231,23 +331,17 @@ public class Main extends Application {
         int[][] rotatedShape = currentPiece.getRotatedShape(clockwise);
         int nextState = clockwise ? (currentPiece.rotationState + 1) % 4 : (currentPiece.rotationState + 3) % 4;
 
-        // Get Kicks
         int[][][] table = (currentPiece.type == TetrominoType.I) ? KickData.I_KICKS : KickData.JLSTZ_KICKS;
-        // O skip
         if (currentPiece.type == TetrominoType.O)
-            table = new int[][][] { { { 0, 0 } } }; // Hacky empty
+            table = new int[][][] { { { 0, 0 } } };
 
-        // Index mapping
         int index = getKickIndex(currentPiece.rotationState, nextState);
         int[][] kicks = (currentPiece.type == TetrominoType.O) ? new int[][] { { 0, 0 } } : table[index];
 
         for (int[] k : kicks) {
             int kickX = k[0];
-            int kickY = -k[1]; // SRS Y is up, Board Y is down
+            int kickY = -k[1];
 
-            // Check collision with rotated shape + kick
-            // We need to clone currentPiece or make a temp one to check?
-            // checking board.canMove with custom shape/x/y
             Tetromino temp = new Tetromino(currentPiece.type);
             temp.shape = rotatedShape;
             temp.x = currentPiece.x + kickX;
@@ -288,30 +382,37 @@ public class Main extends Application {
 
     void lock() {
         board.lock(currentPiece);
+
+        // Game Over Check: Lock Out (if piece locks within buffer zone)
+        for (int r = 0; r < currentPiece.shape.length; r++) {
+            for (int c = 0; c < currentPiece.shape.length; c++) {
+                if (currentPiece.shape[r][c] != 0) {
+                    if (currentPiece.y + r < BUFFER_ZONE) {
+                        gameOver();
+                        return;
+                    }
+                }
+            }
+        }
+
         int cleared = board.clearLines();
 
-        // T-Spin Detection
-        // 3 corner rule
+        if (isMultiplayer)
+            sendBoardState();
+
         boolean tspin = false;
         if (currentPiece.type == TetrominoType.T && currentPiece.lastMoveWasRotate) {
-            // Check corners (Local 0,0 and 2,0 and 0,2 and 2,2 for 3x3 T)
-            // Corners of T (3x3): (0,0), (2,0), (0,2), (2,2)
             int px = currentPiece.x;
             int py = currentPiece.y;
             int corners = 0;
-            // Top-Left (0,0)
             if (isOccupied(px, py))
                 corners++;
-            // Top-Right (2,0)
             if (isOccupied(px + 2, py))
                 corners++;
-            // Bottom-Left (0,2)
             if (isOccupied(px, py + 2))
                 corners++;
-            // Bottom-Right (2,2)
             if (isOccupied(px + 2, py + 2))
                 corners++;
-
             if (corners >= 3)
                 tspin = true;
         }
@@ -332,7 +433,6 @@ public class Main extends Application {
                         base = 1600;
                         break;
                 }
-                System.out.println("T-SPIN!"); // Debug
             } else {
                 switch (cleared) {
                     case 1:
@@ -349,28 +449,67 @@ public class Main extends Application {
                         break;
                 }
             }
-            if ((tspin || cleared == 4) && backToBack) {
+            if ((tspin || cleared == 4) && backToBack)
                 base = (int) (base * 1.5);
-                System.out.println("BACK-TO-BACK!");
-            }
             backToBack = (tspin || cleared == 4);
-
             score += base * level;
             level = linesCleared / 10 + 1;
-            dropInterval = Math.max(100_000_000, 500_000_000 - (level - 1) * 50_000_000);
+
+            dropInterval = Math.max(50, 1000 - (level - 1) * 100);
+
+            if (isMultiplayer && cleared > 1) {
+                int damage = cleared - 1 + (tspin ? 1 : 0);
+                if (damage > 0)
+                    netClient.sendAttack(damage);
+            }
         } else {
             combo = -1;
         }
-
         spawnPiece();
     }
 
+    void sendBoardState() {
+        if (netClient == null)
+            return;
+        StringBuilder sb = new StringBuilder();
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                sb.append(board.grid[y][x] == 0 ? "0" : "1");
+            }
+        }
+        netClient.sendState(sb.toString());
+    }
+
+    void parseOpponentState(String data) {
+        if (opponentBoard == null)
+            opponentBoard = new int[HEIGHT][WIDTH];
+        int idx = 0;
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                if (idx < data.length()) {
+                    opponentBoard[y][x] = data.charAt(idx++) == '1' ? 1 : 0;
+                }
+            }
+        }
+    }
+
+    void addGarbage(int lines) {
+        for (int i = 0; i < lines; i++) {
+            for (int y = 0; y < HEIGHT - 1; y++) {
+                board.grid[y] = board.grid[y + 1].clone();
+            }
+            board.grid[HEIGHT - 1] = new int[WIDTH];
+            for (int x = 0; x < WIDTH; x++)
+                board.grid[HEIGHT - 1][x] = 1;
+            board.grid[HEIGHT - 1][new Random().nextInt(WIDTH)] = 0;
+        }
+    }
+
     boolean isOccupied(int x, int y) {
-        // Wall or Block
         if (x < 0 || x >= WIDTH || y >= HEIGHT)
-            return true; // Wall/Floor
+            return true;
         if (y < 0)
-            return false; // Sky
+            return false;
         return board.grid[y][x] != 0;
     }
 
@@ -389,33 +528,31 @@ public class Main extends Application {
             return;
         if (holdPiece == null) {
             holdPiece = new Tetromino(currentPiece.type);
-            spawnPiece(); // next -> current, new next
+            spawnPiece();
         } else {
             TetrominoType temp = currentPiece.type;
-            currentPiece = new Tetromino(holdPiece.type); // Reset rotation
-            currentPiece.x = WIDTH / 2 - 2;
+            currentPiece = new Tetromino(holdPiece.type);
+            currentPiece.x = WIDTH / 2 - currentPiece.shape.length / 2;
             currentPiece.y = 0;
             holdPiece = new Tetromino(temp);
         }
         holdUsed = true;
-        // Check immediate collision
         if (!board.canMove(currentPiece, currentPiece.x, currentPiece.y)) {
-            isGameOver = true;
+            gameOver();
         }
     }
 
     void spawnPiece() {
         currentPiece = nextPiece;
         spawnNextPiece();
-
-        currentPiece.x = WIDTH / 2 - currentPiece.shape.length / 2; // Center based on size
-        currentPiece.y = 0;
+        currentPiece.x = WIDTH / 2 - currentPiece.shape.length / 2;
+        currentPiece.y = 0; // Spawns at top of buffer (hidden)
         touchingGround = false;
         holdUsed = false;
 
+        // Game Over Check: If we can't spawn at all
         if (!board.canMove(currentPiece, currentPiece.x, currentPiece.y)) {
-            isGameOver = true;
-            System.out.println("GAME OVER");
+            gameOver();
         }
     }
 
@@ -424,32 +561,112 @@ public class Main extends Application {
         nextPiece = new Tetromino(types[new Random().nextInt(types.length)]);
     }
 
-    // --- Draw ---
+    void gameOver() {
+        isGameOver = true;
+        if (isMultiplayer && netClient != null)
+            netClient.sendGameOver();
+
+        // Return to menu after 3 seconds
+        PauseTransition pause = new PauseTransition(Duration.seconds(3));
+        pause.setOnFinished(e -> {
+            if (gameLoop != null) {
+                gameLoop.stop();
+            }
+            if (netClient != null) {
+                netClient.disconnect();
+                netClient = null;
+            }
+            isMultiplayer = false;
+            Platform.runLater(() -> primaryStage.setScene(menuScene));
+        });
+        pause.play();
+    }
+
     void draw() {
-        handleInputPrecise(); // Apply input every frame for smoothness
+        if (!isGameOver) {
+            handleInput(System.currentTimeMillis());
+        }
 
         drawBackground();
-        drawBoard();
+        drawBoard(BOARD_OFFSET_X, BOARD_OFFSET_Y, board.grid, TILE);
         drawGhost();
         drawPiece(currentPiece, currentPiece.x, currentPiece.y);
+
+        if (isMultiplayer && opponentBoard != null) {
+            // Opponent board: hide buffer zone, show only visible 20 rows
+            drawBoard(OPPONENT_OFFSET_X, BOARD_OFFSET_Y, opponentBoard, 20, true);
+            gc.setFill(Color.WHITE);
+            gc.setFont(Font.font("Arial", FontWeight.BOLD, 20));
+            gc.fillText("OPPONENT", OPPONENT_OFFSET_X, BOARD_OFFSET_Y - 20);
+        }
+
         drawUI();
     }
 
-    void drawBackground() {
-        gc.setFill(Color.rgb(30, 30, 30));
-        gc.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    void drawWaiting() {
         gc.setFill(Color.BLACK);
-        gc.fillRect(BOARD_OFFSET_X, BOARD_OFFSET_Y, WIDTH * TILE, HEIGHT * TILE);
+        gc.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        gc.setFill(Color.WHITE);
+        gc.setFont(Font.font(30));
+        gc.fillText("Waiting for Opponent...", CANVAS_WIDTH / 2 - 150, CANVAS_HEIGHT / 2);
     }
 
-    void drawBoard() {
-        for (int y = 0; y < HEIGHT; y++) {
+    void drawBackground() {
+        // Base: Fill everything with dark background just in case
+        gc.setFill(Color.rgb(30, 30, 30));
+        gc.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // 1. Buffer Zone (Top 4 Rows) - Gray
+        gc.setFill(Color.DARKGRAY);
+        gc.fillRect(BOARD_OFFSET_X, BOARD_OFFSET_Y, WIDTH * TILE, BUFFER_ZONE * TILE);
+
+        // 2. Play Area (Remaining 20 Rows) - Black
+        gc.setFill(Color.BLACK);
+        gc.fillRect(BOARD_OFFSET_X, BOARD_OFFSET_Y + BUFFER_ZONE * TILE, WIDTH * TILE, VISIBLE_HEIGHT * TILE);
+
+        // Multiplay Opponent BG
+        if (isMultiplayer) {
+            // Opponent background
+            gc.setFill(Color.BLACK); // Keeps it simple for opponent
+            gc.fillRect(OPPONENT_OFFSET_X, BOARD_OFFSET_Y, WIDTH * 20, VISIBLE_HEIGHT * 20);
+        }
+    }
+
+    void drawBoard(int offsetX, int offsetY, int[][] grid, int tileSize) {
+        drawBoard(offsetX, offsetY, grid, tileSize, false);
+    }
+
+    void drawBoard(int offsetX, int offsetY, int[][] grid, int tileSize, boolean hideBuffer) {
+        int startY = hideBuffer ? BUFFER_ZONE : 0;
+
+        // Draw rows
+        for (int y = startY; y < grid.length; y++) {
             for (int x = 0; x < WIDTH; x++) {
-                if (board.grid[y][x] != 0) {
-                    drawTile(x + BOARD_OFFSET_X / TILE, y + BOARD_OFFSET_Y / TILE, Color.GRAY);
-                } else {
+                int val = grid[y][x];
+
+                // Calculate visual Y position
+                // if hideBuffer is true, row BUFFER_ZONE should be at offsetY (index 0 relative
+                // to visible)
+                // if hideBuffer is false, row 0 is at offsetY
+                int visualY = hideBuffer ? (y - BUFFER_ZONE) : y;
+
+                if (val > 0) {
+                    // Use stored color
+                    // Ensure index is valid (val-1)
+                    TetrominoType[] types = TetrominoType.values();
+                    Color c = Color.GRAY;
+                    if (val - 1 >= 0 && val - 1 < types.length) {
+                        c = types[val - 1].color;
+                    }
+
+                    gc.setFill(c);
+                    gc.fillRect(offsetX + x * tileSize, offsetY + visualY * tileSize, tileSize, tileSize);
                     gc.setStroke(Color.rgb(40, 40, 40));
-                    gc.strokeRect(BOARD_OFFSET_X + x * TILE, BOARD_OFFSET_Y + y * TILE, TILE, TILE);
+                    gc.strokeRect(offsetX + x * tileSize, offsetY + visualY * tileSize, tileSize, tileSize);
+                } else {
+                    // Grid lines
+                    gc.setStroke(Color.rgb(40, 40, 40));
+                    gc.strokeRect(offsetX + x * tileSize, offsetY + visualY * tileSize, tileSize, tileSize);
                 }
             }
         }
@@ -462,72 +679,79 @@ public class Main extends Application {
         for (int r = 0; r < shape.length; r++) {
             for (int c = 0; c < shape.length; c++) {
                 if (shape[r][c] != 0) {
-                    drawTile(boardX + c + BOARD_OFFSET_X / TILE, boardY + r + BOARD_OFFSET_Y / TILE, p.type.color);
+                    // Draw all parts, even in buffer
+                    drawTile(boardX + c, boardY + r, p.type.color);
                 }
             }
         }
     }
 
     void drawGhost() {
+        if (isGameOver)
+            return;
         if (currentPiece == null)
             return;
         int ghostY = currentPiece.y;
         while (board.canMove(currentPiece, currentPiece.x, ghostY + 1)) {
             ghostY++;
         }
-
         int[][] shape = currentPiece.shape;
         gc.setFill(Color.rgb(255, 255, 255, 0.2));
         for (int r = 0; r < shape.length; r++) {
             for (int c = 0; c < shape.length; c++) {
                 if (shape[r][c] != 0) {
-                    gc.fillRect(BOARD_OFFSET_X + (currentPiece.x + c) * TILE, BOARD_OFFSET_Y + (ghostY + r) * TILE,
-                            TILE, TILE);
+                    gc.fillRect(BOARD_OFFSET_X + (currentPiece.x + c) * TILE,
+                            BOARD_OFFSET_Y + (ghostY + r) * TILE, TILE, TILE);
                 }
             }
         }
     }
 
     void drawTile(int x, int y, Color color) {
+        // x, y here are VISIBLE coordinates (0 to 19)
         gc.setFill(color);
-        gc.fillRect(x * TILE, y * TILE, TILE, TILE);
+        gc.fillRect(BOARD_OFFSET_X + x * TILE, BOARD_OFFSET_Y + y * TILE, TILE, TILE);
         gc.setStroke(Color.WHITESMOKE);
-        gc.strokeRect(x * TILE, y * TILE, TILE, TILE);
+        gc.strokeRect(BOARD_OFFSET_X + x * TILE, BOARD_OFFSET_Y + y * TILE, TILE, TILE);
     }
 
     void drawUI() {
-        // Score etc. same as before
         gc.setFill(Color.WHITE);
-        gc.setFont(Font.font(20));
-        gc.fillText("SCORE: " + score, 20, 50);
-        gc.fillText("LEVEL: " + level, 20, 80);
-        gc.fillText("LINES: " + linesCleared, 20, 110);
+        gc.setFont(Font.font("Arial", FontWeight.BOLD, 20));
+        gc.fillText("SCORE: " + score, 400, 50);
+        gc.fillText("LEVEL: " + level, 400, 80);
 
-        gc.fillText("NEXT", 470, 50);
-        if (nextPiece != null) {
-            // Draw Next (Simplistic)
-            drawMiniPiece(nextPiece, 470, 80);
-        }
+        // NEXT
+        gc.fillText("NEXT", 400, 150);
+        if (nextPiece != null)
+            drawMini(nextPiece, 400, 180);
 
-        gc.fillText("HOLD", 20, 300);
-        if (holdPiece != null) {
-            drawMiniPiece(holdPiece, 20, 330);
-        }
+        // HOLD
+        gc.fillText("HOLD", 400, 300);
+        if (holdPiece != null)
+            drawMini(holdPiece, 400, 330);
 
         if (isGameOver) {
             gc.setFill(Color.RED);
-            gc.setFont(Font.font(40));
-            gc.fillText("GAME OVER", 200, 300);
+            gc.setFont(Font.font("Arial", FontWeight.BOLD, 40));
+            gc.fillText(opponentGameOver ? "VICTORY!" : "GAME OVER", 180, 300);
+        }
+
+        if (isMultiplayer && opponentGameOver && !isGameOver) {
+            gc.setFill(Color.GREEN);
+            gc.setFont(Font.font("Arial", FontWeight.BOLD, 40));
+            gc.fillText("VICTORY!", 180, 300);
+            gameLoop.stop();
         }
     }
 
-    void drawMiniPiece(Tetromino p, int screenX, int screenY) {
+    void drawMini(Tetromino p, int sx, int sy) {
         int[][] shape = p.shape;
         for (int r = 0; r < shape.length; r++) {
             for (int c = 0; c < shape.length; c++) {
                 if (shape[r][c] != 0) {
                     gc.setFill(p.type.color);
-                    gc.fillRect(screenX + c * 20, screenY + r * 20, 20, 20);
+                    gc.fillRect(sx + c * 20, sy + r * 20, 20, 20);
                 }
             }
         }
