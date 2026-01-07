@@ -1,15 +1,36 @@
 package tetris;
 
 public class GameSettings {
-    // Delayed Auto Shift (ms): Delay before auto-repeat starts
-    // User requested slower than 150ms? Or adjustable. Let's start with a relaxed
-    // default.
-    public static long DAS = 200;
+    private static final SettingsManager sm = SettingsManager.getInstance();
 
-    // Auto Repeat Rate (ms): Speed of movement when holding
-    // User requested slower than 40ms. Let's try 60ms.
-    public static long ARR = 30; // 30ms ~ 33Hz (Fast/Smooth)
+    public static long getDas() {
+        return sm.getDas();
+    }
 
-    // Soft Drop Multiplier: 1.0 (Normal) to 20.0 (Fast) or Infinity
-    public static double SOFT_DROP_SPEED = 20.0; // 20x speed default
+    public static long getArr() {
+        return sm.getArr();
+    }
+
+    public static double getSdf() {
+        return sm.getSdf();
+    }
+
+    public static boolean isGhostEnabled() {
+        return sm.isGhostEnabled();
+    }
+
+    public static boolean isSoundEnabled() {
+        return sm.isSoundEnabled();
+    }
+
+    // Constants for backward compatibility or direct access if needed
+    public static long DAS = sm.getDas();
+    public static long ARR = sm.getArr();
+    public static double SOFT_DROP_SPEED = sm.getSdf();
+
+    public static void refresh() {
+        DAS = sm.getDas();
+        ARR = sm.getArr();
+        SOFT_DROP_SPEED = sm.getSdf();
+    }
 }

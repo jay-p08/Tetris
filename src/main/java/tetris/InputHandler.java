@@ -6,8 +6,13 @@ public class InputHandler {
     public long rightTimer = 0;
 
     // Config
-    public final long DAS = GameSettings.DAS;
-    public final long ARR = GameSettings.ARR;
+    public long das = GameSettings.DAS;
+    public long arr = GameSettings.ARR;
+
+    public void refreshConfig() {
+        this.das = GameSettings.getDas();
+        this.arr = GameSettings.getArr();
+    }
 
     public void pressLeft(long time) {
         left = true;

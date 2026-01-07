@@ -1,64 +1,96 @@
 package tetris.net;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.net.Socket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
+import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
-
 import javafx.application.Platform;
 
 public class NetworkClient {
 
-    private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private Thread listenThread;
+    private WebSocket webSocket;
+    private final HttpClient client;
 
     // Callbacks
     public Consumer<String> onMessage;
 
-    public void connect(String host, int port) throws IOException {
-        socket = new Socket(host, port);
-        out = new PrintWriter(socket.getOutputStream(), true);
-        in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+    public NetworkClient() {
+        this.client = HttpClient.newHttpClient();
+    }
 
-        listenThread = new Thread(() -> {
-            try {
-                String line;
-                while ((line = in.readLine()) != null) {
-                    String finalLine = line;
-                    Platform.runLater(() -> {
-                        if (onMessage != null) {
-                            onMessage.accept(finalLine);
-                        }
-                    });
-                }
-            } catch (IOException e) {
+    public void connect(String serverUri) {
+        client.newWebSocketBuilder()
+                .buildAsync(URI.create(serverUri), new WebSocketListener())
+                .thenAccept(ws -> {
+                    this.webSocket = ws;
+                    System.out.println("[WS] WebSocket object assigned.");
+                })
+                .exceptionally(ex -> {
+                    System.err.println("[WS] Connection future failed: " + ex.getMessage());
+                    ex.printStackTrace();
+                    return null;
+                });
+    }
+
+    private class WebSocketListener implements WebSocket.Listener {
+        private final StringBuilder messageBuffer = new StringBuilder();
+
+        @Override
+        public void onOpen(WebSocket webSocket) {
+            System.out.println("[WS] Connected to server");
+            WebSocket.Listener.super.onOpen(webSocket);
+        }
+
+        @Override
+        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+            messageBuffer.append(data);
+            if (last) {
+                String completeMessage = messageBuffer.toString();
+                messageBuffer.setLength(0);
                 Platform.runLater(() -> {
                     if (onMessage != null) {
-                        onMessage.accept("DISCONNECTED");
+                        onMessage.accept(completeMessage);
                     }
                 });
             }
-        }, "NetworkListener");
-        listenThread.setDaemon(true);
-        listenThread.start();
-    }
+            return WebSocket.Listener.super.onText(webSocket, data, last);
+        }
 
-    public synchronized void send(String msg) {
-        if (out != null) {
-            out.println(msg);
+        @Override
+        public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            System.out.println("[WS] Disconnected: " + reason);
+            Platform.runLater(() -> {
+                if (onMessage != null) {
+                    onMessage.accept("DISCONNECTED");
+                }
+            });
+            return WebSocket.Listener.super.onClose(webSocket, statusCode, reason);
+        }
+
+        @Override
+        public void onError(WebSocket webSocket, Throwable error) {
+            System.err.println("[WS] Error: " + error.getMessage());
+            WebSocket.Listener.super.onError(webSocket, error);
         }
     }
 
-    public void createRoom() {
-        send("CREATE_ROOM");
+    public synchronized void send(String msg) {
+        if (webSocket != null) {
+            webSocket.sendText(msg, true);
+        }
     }
 
-    public void joinRoom(String roomId) {
-        send("JOIN_ROOM:" + roomId);
+    public void createRoom(String name, String password, int width, int height) {
+        send("CREATE_ROOM:" + name + "," + password + "," + width + "," + height);
+    }
+
+    public void joinRoom(String roomId, String password) {
+        send("JOIN_ROOM:" + roomId + "," + password);
+    }
+
+    public void requestRoomList() {
+        send("LIST_ROOMS");
     }
 
     public void sendState(String boardString) {
@@ -73,12 +105,13 @@ public class NetworkClient {
         send("GAME_OVER");
     }
 
+    public boolean isConnected() {
+        return webSocket != null && !webSocket.isInputClosed() && !webSocket.isOutputClosed();
+    }
+
     public void disconnect() {
-        try {
-            if (socket != null) {
-                socket.close();
-            }
-        } catch (IOException ignored) {
+        if (webSocket != null) {
+            webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "Manual disconnect");
         }
     }
 }
