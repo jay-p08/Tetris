@@ -1,7 +1,0 @@
-<?xml version="1.0" ?>
-<jpackage-state version="24.0.2" platform="windows">
-  <app-version>1.0</app-version>
-  <main-launcher>TetrisUltimate</main-launcher>
-  <main-class>tetris.Launcher</main-class>
-  <signed>false</signed>
-  <app-store>false</app-store></jpackage-state>

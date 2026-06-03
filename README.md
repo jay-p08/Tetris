@@ -1,1 +1,35 @@
-<h2>플레이 하실 분들은 TetrisUltimate파일에 있는<br>TetrisUltimate.exe파일만 다운로드 하셔도 정상 작동됩니다</h2>
+# Tetris
+
+React frontend and Node WebSocket backend for the Tetris migration.
+
+## Structure
+
+```text
+frontend/  React + Vite client for GitHub Pages
+backend/   Node.js WebSocket server for multiplayer rooms
+```
+
+## Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Build for GitHub Pages:
+
+```bash
+cd frontend
+npm run build
+```
+
+## Backend
+
+```bash
+cd backend
+npm install
+npm start
+```
+
+The backend listens on `PORT` or `9999` by default.
